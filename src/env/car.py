@@ -1,39 +1,49 @@
-import random
+import random, math
 
 class Car:
-    def __init__(self, car_id: int):
+    def __init__(self, car_id, tyre="soft"):
         self.id = car_id
-        self.position = 0.0
+        self.pos = 0.0
         self.speed = 0.0
-        self.fuel = 1.0
-        self.tire_wear = 0.0
+        self.accel = 0.0
+        self.fuel = 100.0
+        self.tyre_wear = 0.0
+        self.damage = 0.0
         self.done = False
+        self.behind_timer = 0.0   # seconds within DRS range
 
-    def update(self, action: int):
-        """
-        action = 0 -> brake
-        action = 1 -> maintain
-        action = 2 -> accelerate
-        """
-        accel = {0: -0.05, 1: 0.0, 2: 0.05}[action]
-        self.speed = max(0.0, min(1.0, self.speed + accel))
-        self.position += self.speed * 10.0  # scaled for visibility
-        self.fuel -= 0.002 + self.speed * 0.001  # faster drains more fuel
-        self.tire_wear += self.speed * 0.002
+    def update(self, action, section, ahead=None, safety=False):
+        throttle = max(-1, min(1, action))
+        grip = max(0.4, 1 - self.tyre_wear - self.damage)
 
-        # Random failure chance (adds realism)
-        if random.random() < 0.001:
-            self.speed *= 0.5
+        # base accel, mass, drag
+        drag = 0.00045 * self.speed**2
+        accel = 30 * throttle * grip - drag
 
-        if self.fuel <= 0:
+        # slow for corners
+        if section.kind == "corner":
+            safe_speed = max(30, section.radius * 0.6)
+            if self.speed > safe_speed:
+                accel -= (self.speed - safe_speed) * 0.3
+                self.damage += 0.0005 * (self.speed - safe_speed)
+
+        # slipstream / DRS
+        if ahead and ahead.pos - self.pos < 100 and ahead.pos > self.pos:
+            self.behind_timer += 0.1
+            if section.drs and self.behind_timer > 1.0:
+                accel += 10  # boost
+        else:
+            self.behind_timer = 0.0
+
+        # safety car mode
+        if safety:
+            accel = min(accel, 0)
+            self.speed = min(self.speed, 40)
+
+        # update dynamics
+        self.speed = max(0, self.speed + accel * 0.1)
+        self.pos += self.speed * 0.1
+        self.fuel -= 0.02 * abs(throttle)
+        self.tyre_wear += 0.0005 * abs(throttle)
+        if self.fuel <= 0 or self.damage >= 1:
             self.done = True
-
-    def get_state(self):
-        return {
-            "id": self.id,
-            "position": self.position,
-            "speed": self.speed,
-            "fuel": self.fuel,
-            "tire_wear": self.tire_wear,
-            "done": self.done,
-        }
