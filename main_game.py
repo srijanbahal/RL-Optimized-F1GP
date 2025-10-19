@@ -27,25 +27,25 @@ DRAG = 0.992
 # Tire compounds with full simulation
 TIRE_COMPOUNDS = {
     'soft': {
-        'wear_rate': 0.0008, 
-        'grip': 1.25, 
-        'temp_optimal': 90, 
+        'wear_rate': 0.0008,
+        'grip': 1.25,
+        'temp_optimal': 90,
         'temp_range': 12,
         'heat_rate': 1.8,
         'color': (255, 50, 50)
     },
     'medium': {
-        'wear_rate': 0.0004, 
-        'grip': 1.0, 
-        'temp_optimal': 80, 
+        'wear_rate': 0.0004,
+        'grip': 1.0,
+        'temp_optimal': 80,
         'temp_range': 18,
         'heat_rate': 1.2,
         'color': (255, 200, 0)
     },
     'hard': {
-        'wear_rate': 0.0002, 
-        'grip': 0.85, 
-        'temp_optimal': 70, 
+        'wear_rate': 0.0002,
+        'grip': 0.85,
+        'temp_optimal': 70,
         'temp_range': 25,
         'heat_rate': 0.8,
         'color': (220, 220, 220)
@@ -98,28 +98,46 @@ def lerp(a, b, t):
 # ---------- Track (Figure-8 Style) ----------
 class Track:
     def __init__(self):
-        # Create a figure-8/infinity style track similar to the image
         self.center_x = WORLD_W // 2
         self.center_y = WORLD_H // 2
         
-        # Generate waypoints for figure-8 pattern
+        # ========== MODIFIED TRACK GENERATION LOGIC START ==========
+        # Define the new track shape with a series of control points
+        # These points approximate the shape from the user's image
+        control_points = [
+            (1000, 1450), # Start/Finish line area
+            (1800, 1450), # End of main straight
+            (2200, 1300), # Start of long right turn
+            (2350, 1000), # Apex 1
+            (2200, 700),  # End of long right turn
+            (1800, 600),  # Top straight
+            (1400, 600),  # End of top straight
+            (1100, 750),  # Start of left complex
+            (1000, 1000), # Midpoint of left complex
+            (1100, 1250), # End of left complex, leads back to straight
+        ]
+
+        # Generate more waypoints by interpolating between control points for smoother curves
         self.waypoints = []
-        num_points = 60
-        
-        for i in range(num_points):
-            t = (i / num_points) * 2 * math.pi
-            # Lemniscate (figure-8) parametric equations
-            scale = 600
-            x = self.center_x + scale * math.cos(t) / (1 + math.sin(t)**2)
-            y = self.center_y + scale * math.sin(t) * math.cos(t) / (1 + math.sin(t)**2)
-            self.waypoints.append((x, y))
-        
+        num_segments = len(control_points)
+        points_per_segment = 12 # Increase for even smoother curves
+
+        for i in range(num_segments):
+            p1 = control_points[i]
+            p2 = control_points[(i + 1) % num_segments] # Loop back to the start
+            for j in range(points_per_segment):
+                t = j / points_per_segment
+                x = lerp(p1[0], p2[0], t)
+                y = lerp(p1[1], p2[1], t)
+                self.waypoints.append((x, y))
+        # ========== MODIFIED TRACK GENERATION LOGIC END ==========
+
         # Track boundaries
         self.track_width = 180
         self.barrier_width = 25
         
-        # Pit lane
-        self.pit_rect = pygame.Rect(self.center_x - 400, self.center_y + 650, 300, 80)
+        # Pit lane (re-positioned along the new start/finish straight)
+        self.pit_rect = pygame.Rect(1100, 1600, 600, 80)
         
         # Start/finish line position
         self.start_line = (self.waypoints[0][0], self.waypoints[0][1])
@@ -131,32 +149,48 @@ class Track:
         # Draw sand runoff areas
         for i in range(len(self.waypoints)):
             x, y = self.waypoints[i]
-            pygame.draw.circle(surf, SAND_YELLOW, 
-                             (int(x - cam_offset[0]), int(y - cam_offset[1])), 
+            pygame.draw.circle(surf, SAND_YELLOW,
+                             (int(x - cam_offset[0]), int(y - cam_offset[1])),
                              self.track_width + 50, 0)
+        
+        # Draw track surface by connecting waypoints
+        pygame.draw.lines(surf, TRACK_GRAY, False,
+                          [(p[0] - cam_offset[0], p[1] - cam_offset[1]) for p in self.waypoints],
+                          self.track_width)
+        # Connect the last point to the first to close the loop
+        p1 = self.waypoints[-1]
+        p2 = self.waypoints[0]
+        pygame.draw.line(surf, TRACK_GRAY,
+                           (p1[0] - cam_offset[0], p1[1] - cam_offset[1]),
+                           (p2[0] - cam_offset[0], p2[1] - cam_offset[1]),
+                           self.track_width)
         
         # Draw outer barriers (red/white)
         for i in range(len(self.waypoints)):
-            x1, y1 = self.waypoints[i]
-            x2, y2 = self.waypoints[(i + 1) % len(self.waypoints)]
+            p1 = self.waypoints[i]
+            p2 = self.waypoints[(i + 1) % len(self.waypoints)]
             
-            # Outer barrier
-            pygame.draw.line(surf, RED if i % 4 < 2 else WHITE,
-                           (x1 - cam_offset[0], y1 - cam_offset[1]),
-                           (x2 - cam_offset[0], y2 - cam_offset[1]), 
+            # Calculate outer edge normal
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            mag = math.hypot(dx, dy)
+            if mag == 0: continue
+            
+            nx, ny = -dy / mag, dx / mag # Normal vector
+            offset = self.track_width / 2 + self.barrier_width / 2
+            
+            x1_outer = p1[0] - cam_offset[0] + nx * offset
+            y1_outer = p1[1] - cam_offset[1] + ny * offset
+            x2_outer = p2[0] - cam_offset[0] + nx * offset
+            y2_outer = p2[1] - cam_offset[1] + ny * offset
+            
+            pygame.draw.line(surf, RED if i % 8 < 4 else WHITE,
+                           (x1_outer, y1_outer),
+                           (x2_outer, y2_outer),
                            self.barrier_width)
-        
-        # Draw track surface
-        for i in range(len(self.waypoints)):
-            x1, y1 = self.waypoints[i]
-            x2, y2 = self.waypoints[(i + 1) % len(self.waypoints)]
-            pygame.draw.line(surf, TRACK_GRAY,
-                           (x1 - cam_offset[0], y1 - cam_offset[1]),
-                           (x2 - cam_offset[0], y2 - cam_offset[1]), 
-                           self.track_width)
-        
+
         # Draw center line dashes
-        for i in range(0, len(self.waypoints), 2):
+        for i in range(0, len(self.waypoints), 4):
             x, y = self.waypoints[i]
             pygame.draw.circle(surf, WHITE,
                              (int(x - cam_offset[0]), int(y - cam_offset[1])), 3)
@@ -165,10 +199,10 @@ class Track:
         sx, sy = self.start_line
         for i in range(-3, 4):
             for j in range(10):
-                if (i + j) % 2 == 0:
-                    rect = pygame.Rect(sx - cam_offset[0] + i * 15 - 7, 
+                color = BLACK if (i + j) % 2 == 0 else WHITE
+                rect = pygame.Rect(sx - cam_offset[0] + i * 15 - 50,
                                      sy - cam_offset[1] + j * 10 - 50, 14, 10)
-                    pygame.draw.rect(surf, BLACK if (i + j) % 2 == 0 else WHITE, rect)
+                pygame.draw.rect(surf, color, rect)
         
         # Draw pit lane
         pit_rect_screen = self.pit_rect.move(-cam_offset[0], -cam_offset[1])
@@ -426,8 +460,8 @@ class Car:
         pygame.draw.rect(car_surf, self.color, pygame.Rect(0, 0, self.length, self.width), border_radius=4)
         
         # Cockpit
-        pygame.draw.rect(car_surf, (30, 30, 30), 
-                        pygame.Rect(self.length * 0.4, 4, self.length * 0.25, self.width - 8), 
+        pygame.draw.rect(car_surf, (30, 30, 30),
+                        pygame.Rect(self.length * 0.4, 4, self.length * 0.25, self.width - 8),
                         border_radius=2)
         
         # Front wing
@@ -468,7 +502,7 @@ class AIController:
         tx, ty = self.waypoints[self.idx]
         cx, cy = self.car.x, self.car.y
         
-        if math.hypot(tx - cx, ty - cy) < 80:
+        if math.hypot(tx - cx, ty - cy) < 120: # Increased distance to switch waypoints for smoother turning
             self.idx = (self.idx + 1) % len(self.waypoints)
             tx, ty = self.waypoints[self.idx]
         
@@ -477,18 +511,18 @@ class AIController:
         # Calculate steering
         desired = math.degrees(math.atan2(ty - cy, tx - cx))
         diff = (desired - self.car.angle + 540) % 360 - 180
-        steer = clamp(diff / 35.0, -1.0, 1.0) * self.skill
+        steer = clamp(diff / 45.0, -1.0, 1.0) * self.skill # Reduced sensitivity for wider turns
         
         # Throttle control based on corner sharpness
-        if abs(diff) > 30:
-            throttle = 0.4 * self.aggression
-        elif abs(diff) > 15:
-            throttle = 0.7 * self.aggression
+        if abs(diff) > 45:
+            throttle = 0.5 * self.aggression
+        elif abs(diff) > 20:
+            throttle = 0.8 * self.aggression
         else:
-            throttle = 0.95 * self.aggression
+            throttle = 1.0 * self.aggression
         
         # Add some variation
-        throttle *= random.uniform(0.88, 1.0)
+        throttle *= random.uniform(0.95, 1.0)
         
         # Pit stop decision
         pit = False
@@ -545,12 +579,12 @@ class SimulationManager:
             # Grid formation (2 by 2)
             row = i // 2
             col = i % 2
-            offset_x = -row * 50
-            offset_y = (col - 0.5) * 35
+            offset_x = -row * 60
+            offset_y = (col - 0.5) * 45
             
             car_id = f"P1" if i == 0 else f"AI{i}"
             car = Car(car_id, start_x + offset_x, start_y + offset_y, color, team_name)
-            car.angle = 180  # Facing right direction
+            car.angle = 0  # Facing right direction along the new straight
             self.cars.append(car)
         
         # Create AI controllers
@@ -593,8 +627,12 @@ class SimulationManager:
             sx, sy = self.track.start_line
             dist_to_line = math.hypot(car.x - sx, car.y - sy)
             
-            if dist_to_line < 60:
-                if car._last_pass is None or self.time - car._last_pass > 8.0:
+            # Check if car is near the start line and moving in the correct direction
+            is_near_line = dist_to_line < 100
+            moving_correctly = car.x < sx + 50 # Ensure car has passed the line
+            
+            if is_near_line and moving_correctly:
+                if car._last_pass is None or self.time - car._last_pass > 10.0:
                     car._last_pass = self.time
                     
                     if car.lap > 0:  # Don't count first crossing
@@ -621,11 +659,13 @@ class SimulationManager:
         """Sort cars by race position"""
         def race_key(c):
             # Finished cars first, then by laps, then by waypoint progress
-            if c.finished:
-                return (1000, -c.total_time)
-            return (c.lap * 1000 + c.waypoint_index, -c.total_time)
+            progress_on_lap = c.waypoint_index / len(self.track.waypoints)
+            return (-c.lap, -progress_on_lap)
         
-        return sorted(self.cars, key=race_key, reverse=True)
+        sorted_cars = sorted([car for car in self.cars if not car.finished], key=race_key)
+        finished_cars = sorted([car for car in self.cars if car.finished], key=lambda c: c.total_time)
+        return finished_cars + sorted_cars
+
 
     def draw(self, surf, cam_offset):
         self.track.draw(surf, cam_offset)
@@ -679,14 +719,14 @@ def draw_leaderboard(surf, sim):
     y_pos = panel_y + 45
     leaderboard = sim.get_leaderboard()
     
-    for i, car in enumerate(leaderboard[:10]):
+    for i, car in enumerate(leaderboard[:20]): # Show more cars if possible
         # Position number background
         pos_color = YELLOW if i == 0 else ORANGE if i == 1 else (200, 140, 30) if i == 2 else DARK_GRAY
         pygame.draw.rect(surf, pos_color, pygame.Rect(panel_x + 15, y_pos, 30, 30), border_radius=4)
         
         # Position number
         pos_text = font_md.render(str(i + 1), True, BLACK if i < 3 else WHITE)
-        surf.blit(pos_text, (panel_x + 23, y_pos + 7))
+        surf.blit(pos_text, (panel_x + 23 - (4 if i+1 < 10 else 8), y_pos + 7))
         
         # Car ID and team
         car_text = font_md.render(f"{car.id} - {car.team_name}", True, car.color)
@@ -704,6 +744,8 @@ def draw_leaderboard(surf, sim):
         elif car.drs_active:
             pygame.draw.circle(surf, GREEN, (status_x, y_pos + 15), 5)
             surf.blit(font_xs.render("DRS", True, GREEN), (status_x + 10, y_pos + 10))
+        elif car.finished:
+            surf.blit(font_xs.render("FIN", True, GREEN), (status_x + 10, y_pos + 10))
         
         y_pos += 38
 
@@ -722,25 +764,27 @@ def draw_telemetry(surf, sim):
     surf.blit(header_text, (panel_x + 15, panel_y + 10))
     
     # Display telemetry for leader (or could be selected car)
-    car = sim.get_leaderboard()[0]
+    leaderboard = sim.get_leaderboard()
+    if not leaderboard: return
+    car = leaderboard[0]
     
     y_pos = panel_y + 45
     
     # Car info section
     surf.blit(font_md.render(f"Car: {car.id} - {car.team_name}", True, car.color), (panel_x + 15, y_pos))
     y_pos += 25
-    surf.blit(font_sm.render(f"Position: {car.position} | Lap: {car.lap}/{LAPS_TO_FINISH}", True, WHITE), 
+    surf.blit(font_sm.render(f"Position: {car.position} | Lap: {car.lap}/{LAPS_TO_FINISH}", True, WHITE),
               (panel_x + 15, y_pos))
     y_pos += 35
     
     # Speed and performance
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "Speed", f"{car.speed:.2f} / {MAX_SPEED:.1f}", 
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "Speed", f"{car.speed*20:.1f} KPH", # Scaled for display
                        car.speed / MAX_SPEED, GREEN)
     y_pos += 35
     
     # Throttle position (simulated from speed)
-    throttle_val = min(1.0, car.speed / MAX_SPEED)
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "Throttle", f"{throttle_val*100:.0f}%", 
+    throttle_val = min(1.0, car.speed / (MAX_SPEED * 0.8))
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "Throttle", f"{throttle_val*100:.0f}%",
                        throttle_val, GREEN)
     y_pos += 35
     
@@ -751,19 +795,19 @@ def draw_telemetry(surf, sim):
     y_pos += 25
     
     tire_color = TIRE_COMPOUNDS[car.tire_compound]['color']
-    surf.blit(font_sm.render(f"Compound: {car.tire_compound.upper()}", True, tire_color), 
+    surf.blit(font_sm.render(f"Compound: {car.tire_compound.upper()}", True, tire_color),
               (panel_x + 15, y_pos))
-    surf.blit(font_sm.render(f"Age: {car.tire_age} laps", True, LIGHT_GRAY), 
+    surf.blit(font_sm.render(f"Age: {car.tire_age} laps", True, LIGHT_GRAY),
               (panel_x + 220, y_pos))
     y_pos += 25
     
     wear_color = GREEN if car.tire_wear < 0.3 else YELLOW if car.tire_wear < 0.6 else RED
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "Wear", f"{car.tire_wear*100:.1f}%", 
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "Wear", f"{car.tire_wear*100:.1f}%",
                        car.tire_wear, wear_color)
     y_pos += 35
     
     temp_color = GREEN if 70 <= car.tire_temp <= 95 else YELLOW if 60 <= car.tire_temp <= 105 else RED
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "Temp", f"{car.tire_temp:.1f}°C", 
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "Temp", f"{car.tire_temp:.1f}°C",
                        (car.tire_temp - 40) / 80, temp_color)
     y_pos += 40
     
@@ -774,16 +818,16 @@ def draw_telemetry(surf, sim):
     y_pos += 25
     
     fuel_color = GREEN if car.fuel > 0.3 else YELLOW if car.fuel > 0.15 else RED
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "Fuel", f"{car.fuel*100:.1f}%", 
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "Fuel", f"{car.fuel*100:.1f}%",
                        car.fuel, fuel_color)
     y_pos += 35
     
-    surf.blit(font_sm.render(f"Engine Mode: {car.engine_mode.upper()}", True, WHITE), 
+    surf.blit(font_sm.render(f"Engine Mode: {car.engine_mode.upper()}", True, WHITE),
               (panel_x + 15, y_pos))
     y_pos += 25
     
     ers_color = GREEN if car.ers_battery > 0.5 else YELLOW if car.ers_battery > 0.2 else RED
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "ERS", f"{car.ers_battery*100:.0f}%", 
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "ERS", f"{car.ers_battery*100:.0f}%",
                        car.ers_battery, ers_color)
     y_pos += 40
     
@@ -794,12 +838,12 @@ def draw_telemetry(surf, sim):
     y_pos += 25
     
     brake_color = GREEN if car.brake_temp < 100 else YELLOW if car.brake_temp < 130 else RED
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "Brakes", f"{car.brake_temp:.1f}°C", 
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "Brakes", f"{car.brake_temp:.1f}°C",
                        (car.brake_temp - 40) / 140, brake_color)
     y_pos += 35
     
     engine_color = GREEN if car.engine_temp < 105 else YELLOW if car.engine_temp < 115 else RED
-    draw_telemetry_row(surf, panel_x + 15, y_pos, "Engine", f"{car.engine_temp:.1f}°C", 
+    draw_telemetry_row(surf, panel_x + 15, y_pos, "Engine", f"{car.engine_temp:.1f}°C",
                        (car.engine_temp - 85) / 40, engine_color)
     y_pos += 40
     
@@ -809,21 +853,21 @@ def draw_telemetry(surf, sim):
     surf.blit(font_md.render("LAP TIMES", True, YELLOW), (panel_x + 15, y_pos))
     y_pos += 25
     
-    surf.blit(font_sm.render(f"Current: {car.current_lap_time:.2f}s", True, WHITE), 
+    surf.blit(font_sm.render(f"Current: {car.current_lap_time:.2f}s", True, WHITE),
               (panel_x + 15, y_pos))
     y_pos += 20
     
     if car.last_lap_time:
-        surf.blit(font_sm.render(f"Last Lap: {car.last_lap_time:.2f}s", True, LIGHT_GRAY), 
+        surf.blit(font_sm.render(f"Last Lap: {car.last_lap_time:.2f}s", True, LIGHT_GRAY),
                   (panel_x + 15, y_pos))
     y_pos += 20
     
     if car.best_lap:
-        surf.blit(font_sm.render(f"Best Lap: {car.best_lap:.2f}s", True, GREEN), 
+        surf.blit(font_sm.render(f"Best Lap: {car.best_lap:.2f}s", True, GREEN),
                   (panel_x + 15, y_pos))
     y_pos += 20
     
-    surf.blit(font_sm.render(f"Total Time: {car.total_time:.2f}s", True, LIGHT_GRAY), 
+    surf.blit(font_sm.render(f"Total Time: {car.total_time:.2f}s", True, LIGHT_GRAY),
               (panel_x + 15, y_pos))
     y_pos += 30
     
@@ -838,12 +882,12 @@ def draw_telemetry(surf, sim):
     surf.blit(font_sm.render(f"DRS: {drs_status}", True, drs_color), (panel_x + 15, y_pos))
     y_pos += 20
     
-    surf.blit(font_sm.render(f"Downforce Level: {car.downforce_level}/10", True, WHITE), 
+    surf.blit(font_sm.render(f"Downforce Level: {car.downforce_level}/10", True, WHITE),
               (panel_x + 15, y_pos))
     y_pos += 25
     
     # Pit stops
-    surf.blit(font_sm.render(f"Pit Stops: {car.pit_stops}", True, ORANGE), 
+    surf.blit(font_sm.render(f"Pit Stops: {car.pit_stops}", True, ORANGE),
               (panel_x + 15, y_pos))
 
 def draw_telemetry_row(surf, x, y, label, value, progress, color):
@@ -861,7 +905,7 @@ def draw_telemetry_row(surf, x, y, label, value, progress, color):
     bar_h = 8
     
     pygame.draw.rect(surf, DARK_GRAY, pygame.Rect(bar_x, bar_y, bar_w, bar_h), border_radius=4)
-    pygame.draw.rect(surf, color, pygame.Rect(bar_x, bar_y, int(bar_w * clamp(progress, 0, 1)), bar_h), 
+    pygame.draw.rect(surf, color, pygame.Rect(bar_x, bar_y, int(bar_w * clamp(progress, 0, 1)), bar_h),
                      border_radius=4)
 
 def draw_race_stats(surf, sim):
@@ -900,35 +944,35 @@ def draw_race_stats(surf, sim):
     col2_x = panel_x + 200
     col3_x = panel_x + 380
     
-    surf.blit(font_sm.render(f"Cars Racing: {racing_cars}/{total_cars}", True, WHITE), 
+    surf.blit(font_sm.render(f"Cars Racing: {racing_cars}/{total_cars}", True, WHITE),
               (col1_x, y_pos))
-    surf.blit(font_sm.render(f"Cars Finished: {finished_cars}", True, WHITE), 
+    surf.blit(font_sm.render(f"Cars Finished: {finished_cars}", True, WHITE),
               (col2_x, y_pos))
-    surf.blit(font_sm.render(f"Cars in Pit: {cars_in_pit}", True, ORANGE), 
+    surf.blit(font_sm.render(f"Cars in Pit: {cars_in_pit}", True, ORANGE),
               (col3_x, y_pos))
     y_pos += 25
     
-    surf.blit(font_sm.render(f"Avg Speed: {avg_speed:.2f}", True, WHITE), 
+    surf.blit(font_sm.render(f"Avg Speed: {avg_speed*20:.1f} KPH", True, WHITE),
               (col1_x, y_pos))
     
     if fastest_lap and fastest_car:
-        surf.blit(font_sm.render(f"Fastest Lap: {fastest_lap:.2f}s", True, GREEN), 
+        surf.blit(font_sm.render(f"Fastest Lap: {fastest_lap:.2f}s", True, GREEN),
                   (col2_x, y_pos))
-        surf.blit(font_sm.render(f"By: {fastest_car.id}", True, fastest_car.color), 
+        surf.blit(font_sm.render(f"By: {fastest_car.id}", True, fastest_car.color),
                   (col3_x, y_pos))
     
     y_pos += 25
     
     # Incidents and penalties
     total_penalties = sum(c.penalties for c in sim.cars)
-    surf.blit(font_sm.render(f"Total Penalties: {total_penalties:.0f}s", True, RED if total_penalties > 0 else WHITE), 
+    surf.blit(font_sm.render(f"Total Penalties: {total_penalties:.0f}s", True, RED if total_penalties > 0 else WHITE),
               (col1_x, y_pos))
 
 def draw_minimap(surf, sim):
     """Bottom right - Track minimap"""
     map_w = 320
     map_h = 220
-    map_x = SCREEN_W - map_w - 410
+    map_x = SCREEN_W - map_w - 440
     map_y = SCREEN_H - map_h - 10
     
     pygame.draw.rect(surf, PANEL_BG, pygame.Rect(map_x, map_y, map_w, map_h), border_radius=8)
@@ -948,27 +992,24 @@ def draw_minimap(surf, sim):
     
     # Draw track outline
     waypoints = sim.track.waypoints
-    for i in range(len(waypoints)):
-        x1, y1 = waypoints[i]
-        x2, y2 = waypoints[(i + 1) % len(waypoints)]
+    map_points = []
+    for x, y in waypoints:
+        sx = int((x - WORLD_W // 2) * scale * 2.5) + offset_x # Scale up minimap track
+        sy = int((y - WORLD_H // 2) * scale * 2.5) + offset_y
+        map_points.append((sx, sy))
         
-        sx1 = int((x1 - WORLD_W // 2) * scale) + offset_x
-        sy1 = int((y1 - WORLD_H // 2) * scale) + offset_y
-        sx2 = int((x2 - WORLD_W // 2) * scale) + offset_x
-        sy2 = int((y2 - WORLD_H // 2) * scale) + offset_y
-        
-        pygame.draw.line(surf, GRAY, (sx1, sy1), (sx2, sy2), 3)
+    pygame.draw.lines(surf, GRAY, True, map_points, 3)
     
     # Draw start line
     sx, sy = sim.track.start_line
-    start_x = int((sx - WORLD_W // 2) * scale) + offset_x
-    start_y = int((sy - WORLD_H // 2) * scale) + offset_y
+    start_x = int((sx - WORLD_W // 2) * scale * 2.5) + offset_x
+    start_y = int((sy - WORLD_H // 2) * scale * 2.5) + offset_y
     pygame.draw.circle(surf, WHITE, (start_x, start_y), 5)
     
     # Draw cars
     for car in sim.cars:
-        cx = int((car.x - WORLD_W // 2) * scale) + offset_x
-        cy = int((car.y - WORLD_H // 2) * scale) + offset_y
+        cx = int((car.x - WORLD_W // 2) * scale * 2.5) + offset_x
+        cy = int((car.y - WORLD_H // 2) * scale * 2.5) + offset_y
         
         # Draw car position
         pygame.draw.circle(surf, car.color, (cx, cy), 4)
@@ -997,12 +1038,13 @@ def main():
     running = True
     paused = False
     
-    # Camera follows center of track
-    cam_x = WORLD_W // 2 - (SCREEN_W // 2)
-    cam_y = WORLD_H // 2 - (SCREEN_H // 2)
+    # Camera follows player car (P1)
+    cam_x = sim.cars[0].x - (SCREEN_W // 2)
+    cam_y = sim.cars[0].y - (SCREEN_H // 2)
     
     while running:
         dt = clock.tick(FPS) / 1000.0
+        if dt > 0.05: dt = 0.05 # Prevent large physics steps if game lags
         
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -1018,6 +1060,12 @@ def main():
             player_action = get_player_action(keys)
             sim.step(dt, player_action)
         
+        # Camera smoothing to follow the player car
+        target_cam_x = sim.cars[0].x - ( (SCREEN_W - 850) / 2)
+        target_cam_y = sim.cars[0].y - ( (SCREEN_H - 250) / 2)
+        cam_x = lerp(cam_x, target_cam_x, 0.1)
+        cam_y = lerp(cam_y, target_cam_y, 0.1)
+
         # Render
         screen.fill(DARK_BG)
         
@@ -1047,7 +1095,6 @@ def main():
         status_text = "PAUSED" if paused else "LIVE"
         status_color = ORANGE if paused else GREEN
         controls = f"[{status_text}] W/A/S/D: Drive | E: ERS | F: DRS | SPACE: Pit | P: Pause | ESC: Exit"
-        # surf.blit(font_sm.render(controls, True, status_color), (viewport_x + 10, viewport_y + viewport_h + 10))
         screen.blit(font_sm.render(controls, True, status_color), (viewport_x + 10, viewport_y + viewport_h + 10))
         
         pygame.display.flip()
