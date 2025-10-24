@@ -156,6 +156,16 @@ class Track:
 # ---------- Car ----------
 class Car:
     def __init__(self, sim_world, id, x, y, color, team_name):
+        # Telemetry-related properties
+        self.fuel = 100.0          # percentage
+        self.tire_wear = 0.0       # percentage
+        self.tire_temp = 45.0      # °C
+        self.brake_temp = 40.0     # °C
+        self.engine_temp = 85.0    # °C
+        self.ers = 100.0           # %
+        self.downforce_level = 5
+        self.drs_enabled = False
+
         self.id, self.team_name, self.color = id, team_name, color
         self.width, self.length = 20, 36
         
@@ -279,6 +289,14 @@ class Car:
         self.x, self.y = pos.x * PPM, pos.y * PPM
         self.angle = math.degrees(self.body.angle)
         self.speed = self.body.linearVelocity.length * PPM
+        # Simple telemetry simulation
+        self.fuel = max(0.0, self.fuel - 0.01)                 # burns fuel slowly
+        self.tire_wear = min(100.0, self.tire_wear + 0.005)    # tires wear over time
+        self.tire_temp = min(130.0, self.tire_temp + abs(self.speed) * 0.002)
+        self.brake_temp = min(1000.0, self.brake_temp + abs(self.speed) * 0.005)
+        self.engine_temp = clamp(85.0 + abs(self.speed) * 0.02, 85.0, 130.0)
+        self.ers = max(0.0, self.ers - 0.002)
+
 
     def draw(self, surf, cam_offset):
         car_surf = pygame.Surface((self.length, self.width), pygame.SRCALPHA)
@@ -491,49 +509,73 @@ def draw_leaderboard(surf, sim):
     # Update camera focus if a new car was clicked
     if clicked_car:
         sim.set_focus_car(clicked_car)
-
-
+        
+        
 def draw_telemetry(surf, sim):
     rect = pygame.Rect(SCREEN_W - scale_x(430), scale_y(80), scale_x(420), SCREEN_H - scale_y(90))
     draw_panel(surf, rect, "CAR TELEMETRY")
-    
-    # car = sim.get_leaderboard()[0] if sim.get_leaderboard() else None
-    
-    car = sim.focused_car if sim.focused_car else (sim.get_leaderboard()[0] if sim.get_leaderboard() else None)
 
-    if not car: return
-    
+    car = sim.focused_car if sim.focused_car else None
+    if not car:
+        return
+
     y_pos = rect.y + scale_y(55)
-    
-    def draw_row(label, value_surf):
+
+    def draw_row(label, value, color=LIGHT_GRAY):
         nonlocal y_pos
-        surf.blit(font_md.render(label, True, GRAY), (rect.x + 15, y_pos))
-        surf.blit(value_surf, (rect.x + scale_x(150), y_pos))
+        surf.blit(font_md.render(f"{label}:", True, GRAY), (rect.x + 15, y_pos))
+        surf.blit(font_md.render(str(value), True, color), (rect.x + scale_x(160), y_pos))
         y_pos += scale_y(30)
-        
+
     def draw_bar(label, val, max_val, color):
         nonlocal y_pos
         progress = clamp(val / max_val, 0, 1)
         bar_w, bar_h = rect.width - 30, scale_y(22)
-        
         pygame.draw.rect(surf, DARK_GRAY, (rect.x + 15, y_pos, bar_w, bar_h), border_radius=4)
         pygame.draw.rect(surf, color, (rect.x + 15, y_pos, bar_w * progress, bar_h), border_radius=4)
-        
-        text = f"{label}: {val:.1f}" if isinstance(val, float) else f"{label}: {val*100:.0f}%"
-        surf.blit(font_sm.render(text, True, WHITE), (rect.x + 25, y_pos + 4))
+        txt = f"{label}: {val:.1f}" if isinstance(val, float) else f"{label}: {val*100:.0f}%"
+        surf.blit(font_sm.render(txt, True, WHITE), (rect.x + 25, y_pos + 4))
         y_pos += scale_y(35)
-        
-    draw_row("Driver:", font_md.render(f"{car.id} - {car.team_name}", True, car.color))
-    draw_row("Position:", font_md.render(f"{car.position} / {len(sim.cars)}", True, WHITE))
-    draw_row("Lap:", font_md.render(f"{car.lap} / {LAPS_TO_FINISH}", True, WHITE))
-    y_pos += scale_y(15)
-    
-    draw_bar("Speed", car.speed * 3.6, 300, GREEN) # Convert to KPH for display
-    draw_bar("ERS", 1.0, 1.0, GREEN) # Placeholder
-    y_pos += scale_y(15)
 
-    draw_row("Last Lap:", font_md.render(f"{car.last_lap_time:.3f}s" if car.last_lap_time else "N/A", True, LIGHT_GRAY))
-    draw_row("Best Lap:", font_md.render(f"{car.best_lap:.3f}s" if car.best_lap else "N/A", True, (155, 89, 182)))
+    # ─── CORE INFO ───────────────────────────────
+    draw_row("Car", f"{car.id} - {car.team_name}", car.color)
+    draw_row("Position", f"{car.position} / {len(sim.cars)}")
+    draw_row("Lap", f"{car.lap}/{LAPS_TO_FINISH}")
+    y_pos += scale_y(10)
+
+    # ─── SPEED / THROTTLE ────────────────────────
+    draw_bar("Speed (KPH)", car.speed * 3.6, 350, GREEN)
+    draw_bar("Throttle", abs(getattr(car, 'throttle_input', 0)) * 100, 100, ORANGE)
+    y_pos += scale_y(10)
+
+    # ─── TIRES ───────────────────────────────────
+    draw_row("Compound", car.tire_compound.upper(), TIRE_COMPOUNDS[car.tire_compound]['color'])
+    draw_bar("Wear", getattr(car, "tire_wear", 0.0), 100, YELLOW)
+    draw_bar("Temp (°C)", getattr(car, "tire_temp", 45.0), 130, RED)
+    y_pos += scale_y(10)
+
+    # ─── FUEL & POWER ────────────────────────────
+    draw_bar("Fuel (%)", getattr(car, "fuel", 100.0), 100, (80, 160, 255))
+    draw_row("Engine Mode", car.engine_mode.upper(), LIGHT_GRAY)
+    draw_bar("ERS (%)", getattr(car, "ers", 100.0), 100, GREEN)
+    y_pos += scale_y(10)
+
+    # ─── TEMPERATURES ────────────────────────────
+    draw_bar("Brakes (°C)", getattr(car, "brake_temp", 40.0), 1000, ORANGE)
+    draw_bar("Engine (°C)", getattr(car, "engine_temp", 85.0), 130, RED)
+    y_pos += scale_y(10)
+
+    # ─── LAP TIMES ───────────────────────────────
+    draw_row("Current Lap", f"{car.current_lap_time:.2f}s")
+    draw_row("Total Time", f"{car.total_time:.2f}s")
+    y_pos += scale_y(10)
+
+    # ─── AERODYNAMICS ────────────────────────────
+    drs_status = getattr(car, "drs_enabled", False)
+    draw_row("DRS", "ENABLED" if drs_status else "DISABLED", GREEN if drs_status else RED)
+    draw_row("Downforce", f"{getattr(car, 'downforce_level', 5)}/10")
+    draw_row("Pit Stops", getattr(car, "pit_stops", 0))
+
 
 def draw_bottom_panels(surf, sim):
     stats_w, map_w = scale_x(500), scale_x(320)
