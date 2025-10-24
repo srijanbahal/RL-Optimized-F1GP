@@ -90,26 +90,29 @@ def catmull_rom_spline(p0, p1, p2, p3, t):
 # ---------- Track ----------
 class Track:
     def __init__(self):
-        # *** CHANGED: New control points for a more complex track ***
+        # Track layout (slightly adjusted to fit pit lane visually)
         control_points = [
-            (500, 1600), (1500, 1600), (2000, 1400), (2200, 1000), (2000, 600),
-            (1500, 400), (1000, 400), (700, 600), (700, 900), (1000, 1100),
-            (800, 1300), (500, 1400)
+            (500, 1600), (1500, 1600), (2100, 1450), (2250, 1000),
+            (2100, 600), (1500, 400), (900, 450), (700, 750),
+            (800, 1100), (600, 1300), (500, 1450)
         ]
-        
+
         self.waypoints = []
-        num_control_points = len(control_points)
-        for i in range(num_control_points):
-            p0, p1 = control_points[(i - 1 + num_control_points) % num_control_points], control_points[i]
-            p2, p3 = control_points[(i + 1) % num_control_points], control_points[(i + 2) % num_control_points]
-            
-            # *** CHANGED: Increased from 20 to 40 for a smoother line ***
-            for t_step in range(40): 
+        num_points = len(control_points)
+        for i in range(num_points):
+            p0, p1 = control_points[(i - 1 + num_points) % num_points], control_points[i]
+            p2, p3 = control_points[(i + 1) % num_points], control_points[(i + 2) % num_points]
+            for t_step in range(40):
                 self.waypoints.append(catmull_rom_spline(p0, p1, p2, p3, t_step / 40.0))
-                
-        self.track_width, self.barrier_width = 180, 25
-        self.pit_rect = pygame.Rect(1100, 1600, 600, 80)
+
+        # Track + pit lane geometry
+        self.track_width, self.barrier_width = 220, 25
+
+        # Define a pit lane rectangle near start line (visually right side)
+        self.pit_rect = pygame.Rect(1800, 1500, 400, 100)  # position & size
         self.start_line = self.waypoints[0]
+
+
 
     def draw(self, surf, cam_offset):
         surf.fill(GRASS_GREEN)
@@ -117,11 +120,11 @@ class Track:
         # *** CHANGED: Draw sand as one thick line UNDER the track ***
         # This replaces the bumpy `pygame.draw.circle` loop
         track_points = [(p[0] - cam_offset[0], p[1] - cam_offset[1]) for p in self.waypoints]
-        pygame.draw.lines(surf, SAND_YELLOW, True, track_points, self.track_width + 100)
-        
-        # Draw track
-        pygame.draw.lines(surf, TRACK_GRAY, True, track_points, self.track_width)
-        
+        # Draw smooth sand background (slightly oversized)
+        pygame.draw.lines(surf, SAND_YELLOW, True, track_points, self.track_width + 160)
+        # Draw base track (main gray road)
+        pygame.draw.lines(surf, TRACK_GRAY, True, track_points, self.track_width + 20)
+
         # Draw barriers (rumble strips)
         # This loop is now smoother because `track_points` has more points
         for i, p1 in enumerate(track_points):
@@ -152,6 +155,14 @@ class Track:
         for i in range(-3, 4):
             for j in range(10):
                 pygame.draw.rect(surf, BLACK if (i + j) % 2 == 0 else WHITE, (sx - cam_offset[0] + i * 15 - 50, sy - cam_offset[1] + j * 10 - 50, 14, 10))
+                
+        # Draw pit lane
+        pygame.draw.rect(surf, (60, 60, 70), (self.pit_rect.x - cam_offset[0], self.pit_rect.y - cam_offset[1],
+                                       self.pit_rect.w, self.pit_rect.h))
+        pygame.draw.rect(surf, (255, 255, 255), (self.pit_rect.x - cam_offset[0], self.pit_rect.y - cam_offset[1], self.pit_rect.w, self.pit_rect.h), 2)
+        pit_text = font_sm.render("PIT LANE", True, YELLOW)
+        surf.blit(pit_text, (self.pit_rect.x - cam_offset[0] + 10, self.pit_rect.y - cam_offset[1] + 10))
+
 
 # ---------- Car ----------
 class Car:
@@ -282,6 +293,45 @@ class Car:
         else:
             self.body.linearDamping = 1.0
 
+        
+    def check_pit_stop(self):
+        """Simulated pit stop entry, stay, and exit."""
+        # Start pit stop if fuel/tire thresholds crossed and not already in pit
+        if not self.in_pit and (self.fuel < 15.0 or self.tire_wear > 80.0):
+            # Drive toward pit lane
+            self.target_pit = (random.uniform(1850, 2100), random.uniform(1520, 1580))
+            self.in_pit = True
+            self.pit_timer = 0.0
+            self.pit_stops += 1
+
+        # If in pit lane, simulate being stationary for a while
+        if self.in_pit:
+            self.pit_timer += 1 / FPS
+
+            # During first 1s: move slowly into pit lane area
+            if self.pit_timer < 1.0:
+                tx, ty = self.target_pit
+                dx, dy = tx - self.x, ty - self.y
+                angle = math.atan2(dy, dx)
+                self.body.linearVelocity = (math.cos(angle) * 2.0 / PPM, math.sin(angle) * 2.0 / PPM)
+
+            # Stay still during service
+            elif 1.0 <= self.pit_timer < 4.0:
+                self.body.linearVelocity = (0, 0)
+
+            # Exit pit after 4s
+            else:
+                self.in_pit = False
+                self.target_pit = None
+                self.fuel = 100.0
+                self.tire_wear = 0.0
+                self.tire_temp = 45.0
+                self.brake_temp = 40.0
+                self.engine_temp = 85.0
+                self.ers = 100.0
+
+
+
 
     def sync_with_physics(self):
         """Updates car's state from its physics body."""
@@ -296,6 +346,8 @@ class Car:
         self.brake_temp = min(1000.0, self.brake_temp + abs(self.speed) * 0.005)
         self.engine_temp = clamp(85.0 + abs(self.speed) * 0.02, 85.0, 130.0)
         self.ers = max(0.0, self.ers - 0.002)
+        self.check_pit_stop()
+
 
 
     def draw(self, surf, cam_offset):
@@ -309,6 +361,7 @@ class Car:
         rotated = pygame.transform.rotate(car_surf, -self.angle)
         rect = rotated.get_rect(center=(self.x - cam_offset[0], self.y - cam_offset[1]))
         surf.blit(rotated, rect.topleft)
+    
 
 # ---------- AI Controller ----------
 class AIController:
@@ -332,28 +385,33 @@ class SimulationManager:
         self.world = world(gravity=(0, 0))
         self.track = Track()
 
+        # Only 6 teams (simpler grid)
         teams = [
-            ("Red Bull", (30, 65, 174)), ("Ferrari", (220, 0, 0)), ("Mercedes", (0, 210, 190)),
-            ("McLaren", (255, 135, 0)), ("Aston Martin", (0, 111, 98)), ("Alpine", (34, 147, 209)),
-            ("Williams", (0, 82, 180)), ("AlphaTauri", (43, 69, 98)),
-            ("Alfa Romeo", (155, 0, 28)), ("Haas", (180, 180, 180))
+            ("Red Bull", (30, 65, 174)),
+            ("Ferrari", (220, 0, 0)),
+            ("Mercedes", (0, 210, 190)),
+            ("McLaren", (255, 135, 0)),
+            ("Aston Martin", (0, 111, 98)),
+            ("Alpine", (34, 147, 209))
         ]
 
         self.cars = []
         sx, sy = self.track.start_line
 
-        for i in range(NUM_AI + 1):
-            team_name, color = teams[i % len(teams)]
+        # Create only AI cars now
+        for i in range(len(teams)):
+            team_name, color = teams[i]
             offset_x, offset_y = -(i // 2) * 60, ((i % 2) - 0.5) * 45
-            car_id = f"P1" if i == 0 else f"AI{i}"
+            car_id = f"AI{i+1}"
             self.cars.append(Car(self.world, car_id, sx + offset_x, sy + offset_y, color, team_name))
 
-        # ✅ Moved here — after all cars exist
+        # Default focus = first car (Red Bull)
         self.focused_car = self.cars[0]
 
-        self.ai_ctrl = [AIController(c, self.track.waypoints) for c in self.cars if c.id.startswith("AI")]
-        self.time, self.race_started, self.start_countdown = 0.0, False, 5.0
+        # AI Controllers for all cars
+        self.ai_ctrl = [AIController(c, self.track.waypoints) for c in self.cars]
 
+        self.time, self.race_started, self.start_countdown = 0.0, False, 5.0
 
     def set_focus_car(self, car):
         """Set which car the camera should follow."""
@@ -367,9 +425,9 @@ class SimulationManager:
             else: return
 
         # Update physics based on actions
-        self.cars[0].update_physics(player_action)
-        for i, ai_car in enumerate(self.cars[1:]):
-            ai_car.update_physics(self.ai_ctrl[i].step())
+        # Update all AI cars
+        for ctrl in self.ai_ctrl:
+            ctrl.car.update_physics(ctrl.step())
             
         # Step the physics world
         self.world.Step(TIME_STEP, 10, 8)
@@ -436,27 +494,6 @@ def draw_header(surf, sim):
         text = font_xl.render(f"RACE STARTS IN: {max(0, sim.start_countdown):.1f}", True, RED)
         surf.blit(text, (SCREEN_W - text.get_width() - scale_x(30), scale_y(20)))
 
-# def draw_leaderboard(surf, sim):
-#     rect = pygame.Rect(scale_x(10), scale_y(80), scale_x(380), SCREEN_H - scale_y(90))
-#     draw_panel(surf, rect, "LIVE STANDINGS")
-    
-#     y_pos = rect.y + scale_y(55)
-#     for i, car in enumerate(sim.get_leaderboard()):
-#         if y_pos > rect.y + rect.h - scale_y(40): break
-
-#         pos_color = YELLOW if i == 0 else ORANGE if i == 1 else (200, 140, 30) if i == 2 else DARK_GRAY
-#         pygame.draw.rect(surf, pos_color, (rect.x + 15, y_pos, scale_x(30), scale_y(30)), border_radius=4)
-#         pos_text = font_md.render(str(i + 1), True, BLACK if i < 3 else WHITE)
-#         surf.blit(pos_text, pos_text.get_rect(center=(rect.x + 30, y_pos + scale_y(15))))
-        
-#         pygame.draw.rect(surf, car.color, (rect.x + 55, y_pos + scale_y(5), 5, scale_y(20)))
-        
-#         surf.blit(font_md.render(f"{car.id} - {car.team_name}", True, LIGHT_GRAY), (rect.x + 70, y_pos + scale_y(8)))
-        
-#         status_text, status_color = ("PIT", YELLOW) if car.in_pit else (("FIN", GREEN) if car.finished else (f"Lap {car.lap}/{LAPS_TO_FINISH}", GRAY))
-#         surf.blit(font_sm.render(status_text, True, status_color), (rect.right - scale_x(80), y_pos + scale_y(8)))
-
-#         y_pos += scale_y(38)
 
 def draw_leaderboard(surf, sim):
     rect = pygame.Rect(scale_x(10), scale_y(80), scale_x(380), SCREEN_H - scale_y(90))
@@ -637,7 +674,9 @@ def get_player_action(keys, old_steer):
 def main():
     sim = SimulationManager()
     running, paused = True, False
-    cam_x, cam_y = sim.cars[0].x - (SCREEN_W / 2), sim.cars[0].y - (SCREEN_H / 2)
+    # cam_x, cam_y = sim.cars[0].x - (SCREEN_W / 2), sim.cars[0].y - (SCREEN_H / 2)
+    cam_x, cam_y = sim.focused_car.x - (SCREEN_W / 2), sim.focused_car.y - (SCREEN_H / 2)
+
     
     # *** CHANGED: Added current_steer variable ***
     current_steer = 0.0
