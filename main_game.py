@@ -1,7 +1,3 @@
-"""
-F1 Racing Simulator - Complete Admin Panel with PyBox2D Physics
-Run: python main_game.py
-"""
 
 import math
 import random
@@ -29,7 +25,7 @@ LAPS_TO_FINISH = 5
 # Car physics (now used to apply forces)
 ACCEL_FORCE = 180.0
 BRAKE_FORCE = 220.0
-TURN_TORQUE = 200.0
+TURN_TORQUE = 200.0  # This will be modulated by the smooth steering
 DRAG = 0.992 # Kept for high-speed drag simulation
 
 # Tire compounds
@@ -94,38 +90,64 @@ def catmull_rom_spline(p0, p1, p2, p3, t):
 # ---------- Track ----------
 class Track:
     def __init__(self):
-        control_points = [(1000, 1450), (1800, 1450), (2200, 1300), (2350, 1000), (2200, 700), (1800, 600), (1400, 600), (1100, 750), (1000, 1000), (1100, 1250)]
+        # *** CHANGED: New control points for a more complex track ***
+        control_points = [
+            (500, 1600), (1500, 1600), (2000, 1400), (2200, 1000), (2000, 600),
+            (1500, 400), (1000, 400), (700, 600), (700, 900), (1000, 1100),
+            (800, 1300), (500, 1400)
+        ]
+        
         self.waypoints = []
         num_control_points = len(control_points)
         for i in range(num_control_points):
             p0, p1 = control_points[(i - 1 + num_control_points) % num_control_points], control_points[i]
             p2, p3 = control_points[(i + 1) % num_control_points], control_points[(i + 2) % num_control_points]
-            for t_step in range(20):
-                self.waypoints.append(catmull_rom_spline(p0, p1, p2, p3, t_step / 20))
+            
+            # *** CHANGED: Increased from 20 to 40 for a smoother line ***
+            for t_step in range(40): 
+                self.waypoints.append(catmull_rom_spline(p0, p1, p2, p3, t_step / 40.0))
+                
         self.track_width, self.barrier_width = 180, 25
         self.pit_rect = pygame.Rect(1100, 1600, 600, 80)
         self.start_line = self.waypoints[0]
 
     def draw(self, surf, cam_offset):
         surf.fill(GRASS_GREEN)
-        for x, y in self.waypoints:
-            pygame.draw.circle(surf, SAND_YELLOW, (int(x - cam_offset[0]), int(y - cam_offset[1])), self.track_width + 50, 0)
         
+        # *** CHANGED: Draw sand as one thick line UNDER the track ***
+        # This replaces the bumpy `pygame.draw.circle` loop
         track_points = [(p[0] - cam_offset[0], p[1] - cam_offset[1]) for p in self.waypoints]
+        pygame.draw.lines(surf, SAND_YELLOW, True, track_points, self.track_width + 100)
+        
+        # Draw track
         pygame.draw.lines(surf, TRACK_GRAY, True, track_points, self.track_width)
         
+        # Draw barriers (rumble strips)
+        # This loop is now smoother because `track_points` has more points
         for i, p1 in enumerate(track_points):
             p2 = track_points[(i + 1) % len(track_points)]
             dx, dy, mag = p2[0] - p1[0], p2[1] - p1[1], math.hypot(p2[0] - p1[0], p2[1] - p1[1])
             if mag == 0: continue
             nx, ny = -dy / mag, dx / mag
             offset = self.track_width / 2 + self.barrier_width / 2
-            pygame.draw.line(surf, RED if i % 8 < 4 else WHITE, (p1[0] + nx * offset, p1[1] + ny * offset), (p2[0] + nx * offset, p2[1] + ny * offset), self.barrier_width)
+            
+            # Draw outer barrier
+            p1_outer = (p1[0] + nx * offset, p1[1] + ny * offset)
+            p2_outer = (p2[0] + nx * offset, p2[1] + ny * offset)
+            pygame.draw.line(surf, RED if i % 16 < 8 else WHITE, p1_outer, p2_outer, self.barrier_width)
+            
+            # Draw inner barrier
+            p1_inner = (p1[0] - nx * offset, p1[1] - ny * offset)
+            p2_inner = (p2[0] - nx * offset, p2[1] - ny * offset)
+            pygame.draw.line(surf, RED if i % 16 < 8 else WHITE, p1_inner, p2_inner, self.barrier_width)
 
-        for i in range(0, len(self.waypoints), 8):
+
+        # Draw center line (less frequent)
+        for i in range(0, len(self.waypoints), 15):
             x, y = self.waypoints[i]
             pygame.draw.circle(surf, WHITE, (int(x - cam_offset[0]), int(y - cam_offset[1])), 3)
         
+        # Draw start line
         sx, sy = self.start_line
         for i in range(-3, 4):
             for j in range(10):
@@ -167,26 +189,89 @@ class Car:
         return right_normal.dot(self.body.linearVelocity) * right_normal
 
     def update_physics(self, action):
-        """Applies forces to the physics body based on actions."""
-        # 1. TIRE GRIP / STEERING
+        """
+        Apply forces and torques to this car's physics body based on control actions.
+        Realistic and stable F1-style vehicle dynamics tuned for Box2D.
+        """
+        # ---------------------------------------------------
+        # CONFIGURABLE PARAMETERS (tune these as needed)
+        # ---------------------------------------------------
         grip = TIRE_COMPOUNDS[self.tire_compound]['grip']
-        impulse = -self.get_lateral_velocity() * self.body.mass * grip
-        self.body.ApplyLinearImpulse(impulse, self.body.worldCenter, True)
+        engine_power = ENGINE_MODES[self.engine_mode]['power']
+        max_accel_force = ACCEL_FORCE * engine_power
+        max_brake_force = BRAKE_FORCE
+        max_turn_torque = TURN_TORQUE
+        lateral_grip_factor = 8.0 * grip      # higher = more grip, less sliding
+        longitudinal_drag_coeff = 0.25        # 0.2–0.3 is realistic
+        angular_vel_limit = 10.0              # clamp spin speed (rad/s)
+        angular_vel_damp_factor = 0.9         # damping multiplier when limit exceeded
+        steer_speed_scale_min = 0.5           # stronger steering at low speed
+        steer_speed_scale_max = 10.0          # weaker steering at high speed
+        throttle_smooth = 0.2                 # 0.1 = sluggish, 0.3 = twitchy
+        # ---------------------------------------------------
 
-        # 2. ACCELERATION / BRAKING
-        throttle, steer = action.get('throttle', 0.0), action.get('steer', 0.0)
-        power = ENGINE_MODES[self.engine_mode]['power']
-        
-        if throttle > 0:
-            force = self.body.GetWorldVector((1, 0)) * ACCEL_FORCE * throttle * power
-            self.body.ApplyForce(force, self.body.worldCenter, True)
-        elif throttle < 0:
-            force = self.body.GetWorldVector((1, 0)) * BRAKE_FORCE * throttle
-            self.body.ApplyForce(force, self.body.worldCenter, True)
+        # --- Smoothed throttle for stability ---
+        throttle_cmd = clamp(action.get('throttle', 0.0), -1.0, 1.0)
+        self.throttle_input = getattr(self, 'throttle_input', 0.0)
+        self.throttle_input = lerp(self.throttle_input, throttle_cmd, throttle_smooth)
 
-        # 3. TURNING
-        # Apply torque to turn the car
-        self.body.ApplyTorque(TURN_TORQUE * steer, True)
+        steer_input = clamp(action.get('steer', 0.0), -1.0, 1.0)
+
+        # --- Get orientation vectors ---
+        forward_normal = self.body.GetWorldVector(localVector=(1, 0))
+        right_normal   = self.body.GetWorldVector(localVector=(0, 1))
+        vel = self.body.linearVelocity
+
+        # ===================================================
+        # 1️⃣  LATERAL FRICTION  (kill side slip)
+        # ===================================================
+        lateral_speed = right_normal.dot(vel)
+        lateral_impulse = -right_normal * clamp(
+            lateral_speed * self.body.mass,
+            -self.body.mass * lateral_grip_factor,
+            self.body.mass * lateral_grip_factor,
+        )
+        self.body.ApplyLinearImpulse(lateral_impulse, self.body.worldCenter, True)
+
+        # ===================================================
+        # 2️⃣  LONGITUDINAL DRAG (air resistance)
+        # ===================================================
+        forward_speed = forward_normal.dot(vel)
+        drag_force = -forward_normal * forward_speed * abs(forward_speed) * longitudinal_drag_coeff
+        self.body.ApplyForce(drag_force, self.body.worldCenter, True)
+
+        # ===================================================
+        # 3️⃣  ACCELERATION / BRAKING
+        # ===================================================
+        if self.throttle_input > 0.0:
+            # accelerate
+            accel_force = forward_normal * max_accel_force * self.throttle_input
+            self.body.ApplyForce(accel_force, self.body.worldCenter, True)
+        elif self.throttle_input < 0.0:
+            # braking
+            brake_force = forward_normal * max_brake_force * self.throttle_input
+            self.body.ApplyForce(brake_force, self.body.worldCenter, True)
+
+        # ===================================================
+        # 4️⃣  STEERING TORQUE (speed-scaled)
+        # ===================================================
+        speed = max(self.body.linearVelocity.length, steer_speed_scale_min)
+        speed_factor = clamp(speed, steer_speed_scale_min, steer_speed_scale_max)
+        turn_strength = max_turn_torque * steer_input / speed_factor
+        self.body.ApplyTorque(turn_strength, True)
+
+        # ===================================================
+        # 5️⃣  STABILIZATION (spin and velocity clamping)
+        # ===================================================
+        if abs(self.body.angularVelocity) > angular_vel_limit:
+            self.body.angularVelocity *= angular_vel_damp_factor
+
+        # --- optional tiny linear damping correction ---
+        if vel.length > 0.001:
+            self.body.linearDamping = 0.3 + 0.1 * (1.0 - grip)
+        else:
+            self.body.linearDamping = 1.0
+
 
     def sync_with_physics(self):
         """Updates car's state from its physics body."""
@@ -228,19 +313,35 @@ class SimulationManager:
     def __init__(self):
         self.world = world(gravity=(0, 0))
         self.track = Track()
-        teams = [("Red Bull", (30, 65, 174)), ("Ferrari", (220, 0, 0)), ("Mercedes", (0, 210, 190)), ("McLaren", (255, 135, 0)), ("Aston Martin", (0, 111, 98)), ("Alpine", (34, 147, 209)), ("Williams", (0, 82, 180)), ("AlphaTauri", (43, 69, 98)), ("Alfa Romeo", (155, 0, 28)), ("Haas", (180, 180, 180))]
-        
+
+        teams = [
+            ("Red Bull", (30, 65, 174)), ("Ferrari", (220, 0, 0)), ("Mercedes", (0, 210, 190)),
+            ("McLaren", (255, 135, 0)), ("Aston Martin", (0, 111, 98)), ("Alpine", (34, 147, 209)),
+            ("Williams", (0, 82, 180)), ("AlphaTauri", (43, 69, 98)),
+            ("Alfa Romeo", (155, 0, 28)), ("Haas", (180, 180, 180))
+        ]
+
         self.cars = []
         sx, sy = self.track.start_line
+
         for i in range(NUM_AI + 1):
             team_name, color = teams[i % len(teams)]
             offset_x, offset_y = -(i // 2) * 60, ((i % 2) - 0.5) * 45
             car_id = f"P1" if i == 0 else f"AI{i}"
             self.cars.append(Car(self.world, car_id, sx + offset_x, sy + offset_y, color, team_name))
-        
+
+        # ✅ Moved here — after all cars exist
+        self.focused_car = self.cars[0]
+
         self.ai_ctrl = [AIController(c, self.track.waypoints) for c in self.cars if c.id.startswith("AI")]
         self.time, self.race_started, self.start_countdown = 0.0, False, 5.0
 
+
+    def set_focus_car(self, car):
+        """Set which car the camera should follow."""
+        if car in self.cars:
+            self.focused_car = car
+    
     def step(self, dt, player_action):
         if not self.race_started:
             self.start_countdown -= dt
@@ -250,7 +351,6 @@ class SimulationManager:
         # Update physics based on actions
         self.cars[0].update_physics(player_action)
         for i, ai_car in enumerate(self.cars[1:]):
-            self.ai_ctrl[i].step()
             ai_car.update_physics(self.ai_ctrl[i].step())
             
         # Step the physics world
@@ -318,32 +418,89 @@ def draw_header(surf, sim):
         text = font_xl.render(f"RACE STARTS IN: {max(0, sim.start_countdown):.1f}", True, RED)
         surf.blit(text, (SCREEN_W - text.get_width() - scale_x(30), scale_y(20)))
 
+# def draw_leaderboard(surf, sim):
+#     rect = pygame.Rect(scale_x(10), scale_y(80), scale_x(380), SCREEN_H - scale_y(90))
+#     draw_panel(surf, rect, "LIVE STANDINGS")
+    
+#     y_pos = rect.y + scale_y(55)
+#     for i, car in enumerate(sim.get_leaderboard()):
+#         if y_pos > rect.y + rect.h - scale_y(40): break
+
+#         pos_color = YELLOW if i == 0 else ORANGE if i == 1 else (200, 140, 30) if i == 2 else DARK_GRAY
+#         pygame.draw.rect(surf, pos_color, (rect.x + 15, y_pos, scale_x(30), scale_y(30)), border_radius=4)
+#         pos_text = font_md.render(str(i + 1), True, BLACK if i < 3 else WHITE)
+#         surf.blit(pos_text, pos_text.get_rect(center=(rect.x + 30, y_pos + scale_y(15))))
+        
+#         pygame.draw.rect(surf, car.color, (rect.x + 55, y_pos + scale_y(5), 5, scale_y(20)))
+        
+#         surf.blit(font_md.render(f"{car.id} - {car.team_name}", True, LIGHT_GRAY), (rect.x + 70, y_pos + scale_y(8)))
+        
+#         status_text, status_color = ("PIT", YELLOW) if car.in_pit else (("FIN", GREEN) if car.finished else (f"Lap {car.lap}/{LAPS_TO_FINISH}", GRAY))
+#         surf.blit(font_sm.render(status_text, True, status_color), (rect.right - scale_x(80), y_pos + scale_y(8)))
+
+#         y_pos += scale_y(38)
+
 def draw_leaderboard(surf, sim):
     rect = pygame.Rect(scale_x(10), scale_y(80), scale_x(380), SCREEN_H - scale_y(90))
     draw_panel(surf, rect, "LIVE STANDINGS")
     
+    mouse_pos = pygame.mouse.get_pos()
+    mouse_clicked = pygame.mouse.get_pressed()[0]
     y_pos = rect.y + scale_y(55)
-    for i, car in enumerate(sim.get_leaderboard()):
-        if y_pos > rect.y + rect.h - scale_y(40): break
+    clicked_car = None
 
+    for i, car in enumerate(sim.get_leaderboard()):
+        if y_pos > rect.y + rect.h - scale_y(40):
+            break
+
+        row_rect = pygame.Rect(rect.x + 10, y_pos, rect.width - 20, scale_y(35))
+        is_hovered = row_rect.collidepoint(mouse_pos)
+        is_focused = (car == sim.focused_car)
+
+        # Background highlight (hover or selected)
+        if is_focused:
+            pygame.draw.rect(surf, (60, 60, 90), row_rect, border_radius=6)
+        elif is_hovered:
+            pygame.draw.rect(surf, (40, 40, 60), row_rect, border_radius=6)
+
+        # Position badge
         pos_color = YELLOW if i == 0 else ORANGE if i == 1 else (200, 140, 30) if i == 2 else DARK_GRAY
-        pygame.draw.rect(surf, pos_color, (rect.x + 15, y_pos, scale_x(30), scale_y(30)), border_radius=4)
+        pygame.draw.rect(surf, pos_color, (rect.x + 15, y_pos + scale_y(5), scale_x(25), scale_y(25)), border_radius=4)
         pos_text = font_md.render(str(i + 1), True, BLACK if i < 3 else WHITE)
-        surf.blit(pos_text, pos_text.get_rect(center=(rect.x + 30, y_pos + scale_y(15))))
-        
-        pygame.draw.rect(surf, car.color, (rect.x + 55, y_pos + scale_y(5), 5, scale_y(20)))
-        
-        surf.blit(font_md.render(f"{car.id} - {car.team_name}", True, LIGHT_GRAY), (rect.x + 70, y_pos + scale_y(8)))
-        
-        status_text, status_color = ("PIT", YELLOW) if car.in_pit else (("FIN", GREEN) if car.finished else (f"Lap {car.lap}/{LAPS_TO_FINISH}", GRAY))
-        surf.blit(font_sm.render(status_text, True, status_color), (rect.right - scale_x(80), y_pos + scale_y(8)))
+        surf.blit(pos_text, pos_text.get_rect(center=(rect.x + 28, y_pos + scale_y(17))))
+
+        # Team color stripe
+        pygame.draw.rect(surf, car.color, (rect.x + 50, y_pos + scale_y(5), 5, scale_y(25)))
+
+        # Car & team text
+        surf.blit(font_md.render(f"{car.id} - {car.team_name}", True, LIGHT_GRAY), (rect.x + 65, y_pos + scale_y(8)))
+
+        # Status text
+        status_text, status_color = (
+            ("PIT", YELLOW) if car.in_pit
+            else (("FIN", GREEN) if car.finished else (f"Lap {car.lap}/{LAPS_TO_FINISH}", GRAY))
+        )
+        surf.blit(font_sm.render(status_text, True, status_color), (rect.right - scale_x(90), y_pos + scale_y(10)))
+
+        # Detect click
+        if is_hovered and mouse_clicked:
+            clicked_car = car
+
         y_pos += scale_y(38)
+
+    # Update camera focus if a new car was clicked
+    if clicked_car:
+        sim.set_focus_car(clicked_car)
+
 
 def draw_telemetry(surf, sim):
     rect = pygame.Rect(SCREEN_W - scale_x(430), scale_y(80), scale_x(420), SCREEN_H - scale_y(90))
     draw_panel(surf, rect, "CAR TELEMETRY")
     
-    car = sim.get_leaderboard()[0] if sim.get_leaderboard() else None
+    # car = sim.get_leaderboard()[0] if sim.get_leaderboard() else None
+    
+    car = sim.focused_car if sim.focused_car else (sim.get_leaderboard()[0] if sim.get_leaderboard() else None)
+
     if not car: return
     
     y_pos = rect.y + scale_y(55)
@@ -391,25 +548,57 @@ def draw_bottom_panels(surf, sim):
     map_rect = pygame.Rect(stats_rect.right + scale_x(10), panel_y, map_w, panel_h)
     draw_panel(surf, map_rect, "TRACK MAP")
     
-    scale = min((map_rect.w - 40) / WORLD_W, (map_rect.h - 50) / WORLD_H) * 2.5
+    # *** CHANGED: Use a dynamic scale based on track bounds ***
+    min_x = min(p[0] for p in sim.track.waypoints)
+    max_x = max(p[0] for p in sim.track.waypoints)
+    min_y = min(p[1] for p in sim.track.waypoints)
+    max_y = max(p[1] for p in sim.track.waypoints)
+    track_world_w = max_x - min_x
+    track_world_h = max_y - min_y
+    track_center_x = (min_x + max_x) / 2
+    track_center_y = (min_y + max_y) / 2
+    
+    scale = min((map_rect.w - 40) / track_world_w, (map_rect.h - 60) / track_world_h)
     offset_x, offset_y = map_rect.centerx, map_rect.centery + scale_y(10)
-    map_points = [((p[0] - WORLD_W / 2) * scale + offset_x, (p[1] - WORLD_H / 2) * scale + offset_y) for p in sim.track.waypoints]
+    
+    map_points = [(((p[0] - track_center_x) * scale + offset_x), 
+                   ((p[1] - track_center_y) * scale + offset_y)) 
+                  for p in sim.track.waypoints]
+    
     pygame.draw.lines(surf, GRAY, True, map_points, 3)
     
     for car in sim.cars:
-        cx, cy = (car.x - WORLD_W / 2) * scale + offset_x, (car.y - WORLD_H / 2) * scale + offset_y
+        cx, cy = (car.x - track_center_x) * scale + offset_x, (car.y - track_center_y) * scale + offset_y
         pygame.draw.circle(surf, car.color, (cx, cy), 4)
 
-def get_player_action(keys):
-    return {
-        'throttle': 1.0 if keys[pygame.K_w] else -1.0 if keys[pygame.K_s] else 0.0,
-        'steer': -1.0 if keys[pygame.K_a] else 1.0 if keys[pygame.K_d] else 0.0,
+# *** CHANGED: Modified function to smooth steering ***
+def get_player_action(keys, old_steer):
+    """
+    Gets player input and returns a smoothed steering value.
+    Returns: (action_dict, new_steer_value)
+    """
+    throttle = 1.0 if keys[pygame.K_w] else -1.0 if keys[pygame.K_s] else 0.0
+    
+    # Get target steer (full left, full right, or center)
+    target_steer = -1.0 if keys[pygame.K_a] else 1.0 if keys[pygame.K_d] else 0.0
+    
+    # Smoothly move from the old steer value to the target
+    # A lerp factor of 0.15 gives a responsive but smooth feel
+    new_steer = lerp(old_steer, target_steer, 0.15)
+    
+    action = {
+        'throttle': throttle,
+        'steer': new_steer,
     }
+    return action, new_steer
 
 def main():
     sim = SimulationManager()
     running, paused = True, False
     cam_x, cam_y = sim.cars[0].x - (SCREEN_W / 2), sim.cars[0].y - (SCREEN_H / 2)
+    
+    # *** CHANGED: Added current_steer variable ***
+    current_steer = 0.0
     
     while running:
         for event in pygame.event.get():
@@ -417,13 +606,17 @@ def main():
             if event.type == pygame.KEYDOWN and event.key == pygame.K_p: paused = not paused
         
         if not paused:
-            sim.step(TIME_STEP, get_player_action(pygame.key.get_pressed()))
+            # *** CHANGED: Update steering and get action dict ***
+            player_action, current_steer = get_player_action(pygame.key.get_pressed(), current_steer)
+            sim.step(TIME_STEP, player_action)
         
         # Viewport and Camera
         vp_x, vp_y = scale_x(400), scale_y(80)
         vp_w, vp_h = SCREEN_W - scale_x(850), SCREEN_H - scale_y(230)
-        target_cam_x, target_cam_y = sim.cars[0].x - (vp_w / 2), sim.cars[0].y - (vp_h / 2)
+        focus = sim.focused_car if sim.focused_car else sim.cars[0]
+        target_cam_x, target_cam_y = focus.x - (vp_w / 2), focus.y - (vp_h / 2)
         cam_x, cam_y = lerp(cam_x, target_cam_x, 0.1), lerp(cam_y, target_cam_y, 0.1)
+
         
         # Drawing
         screen.fill(DARK_BG)
