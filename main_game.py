@@ -90,11 +90,16 @@ def catmull_rom_spline(p0, p1, p2, p3, t):
 # ---------- Track ----------
 class Track:
     def __init__(self):
-        # Track layout (slightly adjusted to fit pit lane visually)
+        """
+        Redesigned F1-style circuit:
+        - Start/finish straight in the center horizontally
+        - Long flowing corners
+        - Pit lane parallel to main straight
+        """
+        # Wider, longer F1-style layout (roughly "loop" with chicane)
         control_points = [
-            (500, 1600), (1500, 1600), (2100, 1450), (2250, 1000),
-            (2100, 600), (1500, 400), (900, 450), (700, 750),
-            (800, 1100), (600, 1300), (500, 1450)
+            (600, 1400), (1200, 1400), (1800, 1300), (2300, 1000), (2300, 600),
+            (1800, 400), (1200, 400), (800, 600), (600, 900), (700, 1200)
         ]
 
         self.waypoints = []
@@ -102,66 +107,73 @@ class Track:
         for i in range(num_points):
             p0, p1 = control_points[(i - 1 + num_points) % num_points], control_points[i]
             p2, p3 = control_points[(i + 1) % num_points], control_points[(i + 2) % num_points]
-            for t_step in range(40):
-                self.waypoints.append(catmull_rom_spline(p0, p1, p2, p3, t_step / 40.0))
+            for t_step in range(50):  # smoother curvature
+                self.waypoints.append(catmull_rom_spline(p0, p1, p2, p3, t_step / 50.0))
 
-        # Track + pit lane geometry
-        self.track_width, self.barrier_width = 220, 25
+        # Geometry parameters
+        self.track_width, self.barrier_width = 240, 25
 
-        # Define a pit lane rectangle near start line (visually right side)
-        self.pit_rect = pygame.Rect(1800, 1500, 400, 100)  # position & size
-        self.start_line = self.waypoints[0]
+        # Start line near center, on main straight
+        self.start_line = (1200, 1400)
 
-
+        # Pit lane parallel to main straight
+        self.pit_entry = (1200, 1500)
+        self.pit_exit = (1800, 1500)
+        self.pit_rect = pygame.Rect(1150, 1480, 750, 100)
 
     def draw(self, surf, cam_offset):
         surf.fill(GRASS_GREEN)
-        
-        # *** CHANGED: Draw sand as one thick line UNDER the track ***
-        # This replaces the bumpy `pygame.draw.circle` loop
+        pygame.draw.rect(surf, GRASS_GREEN, (0, 0, surf.get_width(), surf.get_height()))
+
+        # Draw sand background (large to prevent leaks)
         track_points = [(p[0] - cam_offset[0], p[1] - cam_offset[1]) for p in self.waypoints]
-        # Draw smooth sand background (slightly oversized)
-        pygame.draw.lines(surf, SAND_YELLOW, True, track_points, self.track_width + 160)
-        # Draw base track (main gray road)
+        pygame.draw.lines(surf, SAND_YELLOW, True, track_points, self.track_width + 180)
+
+        # Draw main asphalt track
         pygame.draw.lines(surf, TRACK_GRAY, True, track_points, self.track_width + 20)
 
-        # Draw barriers (rumble strips)
-        # This loop is now smoother because `track_points` has more points
+        # Barriers
         for i, p1 in enumerate(track_points):
             p2 = track_points[(i + 1) % len(track_points)]
-            dx, dy, mag = p2[0] - p1[0], p2[1] - p1[1], math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-            if mag == 0: continue
+            dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+            mag = math.hypot(dx, dy)
+            if mag == 0:
+                continue
             nx, ny = -dy / mag, dx / mag
             offset = self.track_width / 2 + self.barrier_width / 2
-            
-            # Draw outer barrier
+
             p1_outer = (p1[0] + nx * offset, p1[1] + ny * offset)
             p2_outer = (p2[0] + nx * offset, p2[1] + ny * offset)
-            pygame.draw.line(surf, RED if i % 16 < 8 else WHITE, p1_outer, p2_outer, self.barrier_width)
-            
-            # Draw inner barrier
             p1_inner = (p1[0] - nx * offset, p1[1] - ny * offset)
             p2_inner = (p2[0] - nx * offset, p2[1] - ny * offset)
-            pygame.draw.line(surf, RED if i % 16 < 8 else WHITE, p1_inner, p2_inner, self.barrier_width)
 
+            color = RED if (i % 16 < 8) else WHITE
+            pygame.draw.line(surf, color, p1_outer, p2_outer, self.barrier_width)
+            pygame.draw.line(surf, color, p1_inner, p2_inner, self.barrier_width)
 
-        # Draw center line (less frequent)
-        for i in range(0, len(self.waypoints), 15):
-            x, y = self.waypoints[i]
-            pygame.draw.circle(surf, WHITE, (int(x - cam_offset[0]), int(y - cam_offset[1])), 3)
-        
+        # Draw pit lane
+        pit_rect = self.pit_rect.move(-cam_offset[0], -cam_offset[1])
+        pygame.draw.rect(surf, (50, 50, 65), pit_rect)
+        pygame.draw.rect(surf, WHITE, pit_rect, 2)
+        pit_text = font_sm.render("PIT LANE", True, YELLOW)
+        surf.blit(pit_text, (pit_rect.x + 10, pit_rect.y + 10))
+
         # Draw start line
         sx, sy = self.start_line
         for i in range(-3, 4):
             for j in range(10):
-                pygame.draw.rect(surf, BLACK if (i + j) % 2 == 0 else WHITE, (sx - cam_offset[0] + i * 15 - 50, sy - cam_offset[1] + j * 10 - 50, 14, 10))
-                
-        # Draw pit lane
-        pygame.draw.rect(surf, (60, 60, 70), (self.pit_rect.x - cam_offset[0], self.pit_rect.y - cam_offset[1],
-                                       self.pit_rect.w, self.pit_rect.h))
-        pygame.draw.rect(surf, (255, 255, 255), (self.pit_rect.x - cam_offset[0], self.pit_rect.y - cam_offset[1], self.pit_rect.w, self.pit_rect.h), 2)
-        pit_text = font_sm.render("PIT LANE", True, YELLOW)
-        surf.blit(pit_text, (self.pit_rect.x - cam_offset[0] + 10, self.pit_rect.y - cam_offset[1] + 10))
+                pygame.draw.rect(
+                    surf,
+                    BLACK if (i + j) % 2 == 0 else WHITE,
+                    (sx - cam_offset[0] + i * 15 - 50,
+                     sy - cam_offset[1] + j * 10 - 50, 14, 10)
+                )
+
+        # Centerline dots
+        for i in range(0, len(self.waypoints), 20):
+            x, y = self.waypoints[i]
+            pygame.draw.circle(surf, WHITE, (int(x - cam_offset[0]), int(y - cam_offset[1])), 3)
+
 
 
 # ---------- Car ----------
@@ -441,22 +453,40 @@ class SimulationManager:
         # Lap detection and positioning
         self.update_race_progress()
         self.time += dt
-
     def update_race_progress(self):
         for car in self.cars:
-            if car.finished: continue
+            if car.finished:
+                continue
+
             sx, sy = self.track.start_line
-            if math.hypot(car.x - sx, car.y - sy) < 100 and (car._last_pass is None or self.time - car._last_pass > 10.0):
+            # detect crossing start line
+            if math.hypot(car.x - sx, car.y - sy) < 100 and (
+                car._last_pass is None or self.time - car._last_pass > 10.0
+            ):
                 car._last_pass = self.time
                 if car.lap > 0:
                     car.last_lap_time = car.current_lap_time
-                    if car.best_lap is None or car.current_lap_time < car.best_lap: car.best_lap = car.current_lap_time
+                    if car.best_lap is None or car.current_lap_time < car.best_lap:
+                        car.best_lap = car.current_lap_time
                     car.current_lap_time = 0.0
                 car.lap += 1
-                if car.lap > LAPS_TO_FINISH: car.finished = True
-        
+
+                if car.lap > LAPS_TO_FINISH:
+                    car.finished = True
+                    car.body.linearVelocity = (0, 0)
+                    car.body.angularVelocity = 0
+
+        # Sort leaderboard
         leaderboard = self.get_leaderboard()
-        for i, car in enumerate(leaderboard): car.position = i + 1
+        for i, car in enumerate(leaderboard):
+            car.position = i + 1
+
+        # Stop all cars when everyone finishes
+        if all(c.finished for c in self.cars):
+            for c in self.cars:
+                c.body.linearVelocity = (0, 0)
+                c.body.angularVelocity = 0
+
 
     def get_leaderboard(self):
         def race_key(c): return (-c.lap, -(c.waypoint_index / len(self.track.waypoints)))
@@ -701,7 +731,8 @@ def main():
         
         # Drawing
         screen.fill(DARK_BG)
-        track_surface = pygame.Surface((vp_w, vp_h))
+        # track_surface = pygame.Surface((vp_w, vp_h))
+        track_surface = pygame.Surface((vp_w + 400, vp_h + 400))  # extra margin
         sim.draw(track_surface, (cam_x, cam_y))
         screen.blit(track_surface, (vp_x, vp_y))
         pygame.draw.rect(screen, UI_BORDER, (vp_x, vp_y, vp_w, vp_h), 2)
